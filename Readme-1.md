@@ -206,23 +206,7 @@ Inspect the terminal output and generated JSON evidence files. Exact filenames d
 
 The tool removes exact duplicates, not all semantically similar findings. Compare findings by root cause and determine whether they describe separate defects or multiple consequences of one defect.
 
-## Limitations
 
-* The LLM can produce false positives, miss real defects, or misunderstand business rules.
-* Results depend on prompt quality, supplied context, provider response, and parsing logic.
-* Token limits and provider rate limits can affect large reviews.
-* Exact-match deduplication may leave similar findings.
-* The source hash check helps detect changes to the reviewed source file; it is not a general security or integrity guarantee.
-* This version of `main.py` does **not** automatically execute the project's test suite. Run tests separately if the project has them.
 
-## Security Notes
 
-* Keep API keys in `.env` and exclude secret files from version control.
-* Do not submit code or business data to an external model unless you are authorized to share it with that provider.
-* Verify generated findings before changing production code.
-* Back up or version-control source files before making manual fixes.
-
-## License
-
-Add your project's license here if you plan to distribute it.
 
