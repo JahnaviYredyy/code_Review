@@ -44,7 +44,7 @@ code-review-tool/
 * `review-input/order\_service.py` — Example source file to review.
 * `review-input/BUSINESS\_RULES.md` — Example business rules supplied as review context.
 * `reviews/` — Intended location for saved review output; the actual output directory depends on the command-line option.
-* `tests/` — Test files, if maintained in the project. The current `main.py` version described here does not automatically run tests during a review.
+
 
 The exact contents may vary by local project version.
 
