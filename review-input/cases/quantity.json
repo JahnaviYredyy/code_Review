@@ -1,0 +1,11 @@
+{
+  "customer_id": "C-100",
+  "items": [
+    {
+      "sku": "MUG",
+      "quantity": 3
+    }
+  ],
+  "shipping": "pickup",
+  "request_id": "quantity-001"
+}

@@ -1,0 +1,16 @@
+{
+  "customer_id": "C-100",
+  "items": [
+    {
+      "sku": "LAMP",
+      "quantity": 1
+    },
+    {
+      "sku": "BAG",
+      "quantity": 1
+    }
+  ],
+  "shipping": "standard",
+  "coupon": "SAVE10",
+  "request_id": "shipping-001"
+}

@@ -1,0 +1,2 @@
+{"customer_id": "C-100", "items": [{"sku": "MUG", "quantity": 1}], "shipping": "pickup", "request_id": "single-001"}
+{"customer_id": "C-100", "items": [{"sku": "MISSING", "quantity": 1}], "shipping": "pickup", "request_id": "invalid-001"}
