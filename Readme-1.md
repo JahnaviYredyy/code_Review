@@ -44,7 +44,11 @@ code-review-tool/
 * `review-input/order\_service.py` — Example source file to review.
 * `review-input/BUSINESS\_RULES.md` — Example business rules supplied as review context.
 * `reviews/` — Intended location for saved review output; the actual output directory depends on the command-line option.
+<<<<<<< HEAD
 * `tests/` — Test files, if maintained in the project. The current `main.py` version described here does not automatically run tests during a review.
+=======
+
+>>>>>>> origin/main
 
 The exact contents may vary by local project version.
 
@@ -206,6 +210,7 @@ Inspect the terminal output and generated JSON evidence files. Exact filenames d
 
 The tool removes exact duplicates, not all semantically similar findings. Compare findings by root cause and determine whether they describe separate defects or multiple consequences of one defect.
 
+<<<<<<< HEAD
 ## Limitations
 
 * The LLM can produce false positives, miss real defects, or misunderstand business rules.
@@ -225,4 +230,9 @@ The tool removes exact duplicates, not all semantically similar findings. Compar
 ## License
 
 Add your project's license here if you plan to distribute it.
+=======
+
+
+
+>>>>>>> origin/main
 
