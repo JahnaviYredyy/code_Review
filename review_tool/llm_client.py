@@ -5,8 +5,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 from groq import Groq
+from langfuse import get_client, observe
 
 load_dotenv()
+langfuse = get_client()
 
 
 @dataclass
@@ -23,7 +25,7 @@ class CallRecord:
 
 
 class GroqReviewClient:
-    """Shared Groq client that records metadata for model calls."""
+    """Shared Groq client that records metadata for model calls and traces via Langfuse."""
 
     def __init__(
         self,
@@ -50,6 +52,7 @@ class GroqReviewClient:
         self.client = Groq(api_key=self.api_key)
         self.calls: list[dict[str, Any]] = []
 
+    @observe(name="groq_complete", as_type="generation")
     def complete(
         self,
         system_prompt: str,
@@ -70,7 +73,7 @@ class GroqReviewClient:
         }
 
         if max_tokens is not None:
-            options["max_tokens"] = max_tokens 
+            options["max_tokens"] = max_tokens
 
         started = time.perf_counter()
 
@@ -148,5 +151,27 @@ class GroqReviewClient:
 
         record["status"] = "success"
         self.calls.append(record)
+
+        if os.getenv("LANGFUSE_PUBLIC_KEY"):
+            try:
+                langfuse.update_current_generation(
+                    model=self.model,
+                    model_parameters={
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                    },
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    output=content,
+                    usage_details={
+                        "input": record.get("prompt_tokens") or 0,
+                        "output": record.get("completion_tokens") or 0,
+                        "total": record.get("total_tokens") or 0,
+                    },
+                )
+            except Exception:
+                pass
 
         return content, record

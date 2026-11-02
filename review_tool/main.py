@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from langfuse import get_client, observe
 from review_tool.llm_client import GroqReviewClient
 from review_tool.source_reader import read_source
 
+langfuse = get_client()
 
 MODEL_DEFAULT = "openai/gpt-oss-120b"
 MAX_BATCH_CHARS = 8500
@@ -21,7 +23,7 @@ SAFE_TPM_TARGET = 6500
 
 def wait_for_token_budget(tokens: int | None) -> None:
     """Best-effort pause to reduce token-rate-limit errors."""
-    if not tokens:
+    if tokens is None:
         time.sleep(10)
         return
 
@@ -29,6 +31,7 @@ def wait_for_token_budget(tokens: int | None) -> None:
     time.sleep(min(max(seconds, 2), 60))
 
 
+@observe(name="ast_indexing")
 def build_function_index(source: str) -> list[dict[str, Any]]:
     """Index functions and line numbers without executing source."""
     tree = ast.parse(source)
@@ -50,10 +53,16 @@ def build_function_index(source: str) -> list[dict[str, Any]]:
                         elif isinstance(item.func, ast.Attribute):
                             calls.add(item.func.attr)
 
+                start_line = (
+                    child.decorator_list[0].lineno
+                    if child.decorator_list
+                    else child.lineno
+                )
+
                 entries.append({
                     "name": qualified_name,
                     "short_name": child.name,
-                    "start": child.lineno,
+                    "start": start_line,
                     "end": getattr(child, "end_lineno", child.lineno),
                     "calls": sorted(calls),
                 })
@@ -65,182 +74,6 @@ def build_function_index(source: str) -> list[dict[str, Any]]:
 
     visit(tree)
     return sorted(entries, key=lambda item: item["start"])
-
-
-def build_index_text(entries: list[dict[str, Any]]) -> str:
-    lines = []
-
-    for entry in entries:
-        calls = ", ".join(entry["calls"]) or "none"
-        lines.append(
-            f"{entry['name']} | "
-            f"lines {entry['start']}-{entry['end']} | "
-            f"calls: {calls}"
-        )
-
-    return "\n".join(lines)
-
-
-def extract_json_object(text: str) -> dict[str, Any] | None:
-    """Extract a JSON object from a model response."""
-    try:
-        value = json.loads(text)
-        if isinstance(value, dict):
-            return value
-    except json.JSONDecodeError:
-        pass
-
-    decoder = json.JSONDecoder()
-
-    for match in re.finditer(r"\{", text):
-        try:
-            value, _ = decoder.raw_decode(text[match.start():])
-            if isinstance(value, dict):
-                return value
-        except json.JSONDecodeError:
-            continue
-
-    return None
-
-
-def plan_review(
-    llm: GroqReviewClient,
-    request: str,
-    rules: str,
-    entries: list[dict[str, Any]],
-    evidence: dict[str, Any],
-) -> tuple[str, list[dict[str, Any]]]:
-    """Choose review scope and validate the selected functions."""
-    if not entries:
-        return "all", []
-
-    index_text = build_index_text(entries)
-
-    system_prompt = (
-        "You are a careful Python code-review planner. "
-        "Return a valid JSON review plan."
-    )
-
-    user_prompt = f"""
-Plan a Python source-code review.
-
-USER REQUEST:
-{request}
-
-BUSINESS RULES:
-{rules or "No business rules supplied."}
-
-AVAILABLE FUNCTIONS:
-{index_text}
-
-Understand the user's goal and choose the appropriate scope.
-For a broad review, select all functions.
-For a specific issue, select relevant functions and helpers.
-
-Return one JSON object in one of these formats:
-{{"scope":"all","functions":[]}}
-or
-{{"scope":"focused","functions":["ClassName.function_name"]}}
-
-Rules:
-- scope must be "all" or "focused".
-- For "all", functions must be an empty list.
-- For "focused", use exact qualified names from the index.
-- Do not invent function names.
-- Return JSON only.
-"""
-
-    evidence["calls"].append({
-        "stage": "planning",
-        "system_prompt": system_prompt,
-        "user_prompt": user_prompt,
-        "code_context": index_text,
-        "raw_response": None,
-    })
-
-    response, _ = llm.complete(
-        system_prompt,
-        user_prompt,
-        max_tokens=800,
-    )
-    evidence["calls"][-1]["raw_response"] = response
-
-    plan = extract_json_object(response)
-
-    if not plan:
-        evidence["warnings"].append(
-            "Invalid planning JSON; reviewed all functions."
-        )
-        return "all", entries
-
-    scope = plan.get("scope")
-    names = plan.get("functions")
-
-    if (
-        scope not in {"all", "focused"}
-        or not isinstance(names, list)
-        or not all(isinstance(name, str) for name in names)
-    ):
-        evidence["warnings"].append(
-            "Invalid planning schema; reviewed all functions."
-        )
-        return "all", entries
-
-    if scope == "all":
-        return "all", entries
-
-    by_name = {entry["name"]: entry for entry in entries}
-
-    selected = [
-        by_name[name]
-        for name in dict.fromkeys(names)
-        if name in by_name
-    ]
-
-    if not selected:
-        evidence["warnings"].append(
-            "No valid functions selected; reviewed all functions."
-        )
-        return "all", entries
-
-    return "focused", selected
-
-
-def expand_dependencies(
-    selected: list[dict[str, Any]],
-    entries: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Include discoverable functions called by selected functions."""
-    by_short_name: dict[str, list[dict[str, Any]]] = {}
-
-    for entry in entries:
-        by_short_name.setdefault(entry["short_name"], []).append(entry)
-
-    by_qualified_name = {entry["name"]: entry for entry in entries}
-
-    included = {entry["name"]: entry for entry in selected}
-    frontier = list(selected)
-
-    while frontier:
-        next_frontier = []
-
-        for entry in frontier:
-            for called_name in entry["calls"]:
-                candidate = by_qualified_name.get(called_name)
-                candidates = (
-                    [candidate]
-                    if candidate
-                    else by_short_name.get(called_name, [])
-                )
-
-                for item in candidates:
-                    if item["name"] not in included:
-                        included[item["name"]] = item
-                        next_frontier.append(item)
-
-        frontier = next_frontier
-
-    return sorted(included.values(), key=lambda item: item["start"])
 
 
 def extract_complete_function(
@@ -256,7 +89,6 @@ def extract_complete_function(
         f"{line_number}: {line}"
         for line_number, line in enumerate(lines, start=start)
     )
-
     return (
         f"Function: {entry['name']}\n"
         f"Original lines: {start}-{end}\n"
@@ -264,6 +96,7 @@ def extract_complete_function(
     )
 
 
+@observe(name="batch_creation")
 def make_function_batches(
     source: str,
     entries: list[dict[str, Any]],
@@ -276,7 +109,6 @@ def make_function_batches(
 
     for entry in entries:
         function_text = extract_complete_function(source_lines, entry)
-
         if (
             current_batch
             and current_size + len(function_text) > MAX_BATCH_CHARS
@@ -311,57 +143,72 @@ FINDING_LABELS = {
 
 
 def parse_findings(response_text: str) -> list[dict[str, str]]:
-    """Parse labeled findings from a model response."""
-    if not response_text:
+    """Parse labeled findings from a model response with multi-line support."""
+    if not response_text or not response_text.strip():
         return []
 
-    if (
-        "NO_BUGS_FOUND" in response_text.upper()
-        and not re.search(r"\bBug\s*:", response_text, re.IGNORECASE)
+    if "NO_BUGS_FOUND" in response_text.upper() and not re.search(
+        r"(?:[-*]\s*)?(?:\*\*|__)?\s*Bug\s*(?:\*\*|__)?\s*:",
+        response_text,
+        re.IGNORECASE,
     ):
         return []
 
-    pattern = re.compile(
-        r"^\s*(?:[-*]\s*)?\**\s*"
-        r"(Bug|Function|Location|Evidence|Impact|"
-        r"Uncertainty|Next checks)"
-        r"\s*:\s*\**\s*(.*?)\s*$",
-        re.IGNORECASE | re.MULTILINE,
+    header_pattern = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:#{1,6}\s*)?(?:\*\*|__)?\s*"
+        r"(Bug|Function|Location|Evidence|Impact|Uncertainty|Next checks)"
+        r"\s*(?:\*\*|__)?\s*:\s*(.*)$",
+        re.IGNORECASE,
     )
 
     findings: list[dict[str, str]] = []
     current: dict[str, str] = {}
+    current_key: str | None = None
 
     def save_current() -> None:
-        if all(
-            current.get(key)
-            for key in ("bug", "function", "location")
-        ):
-            for key in (
-                "evidence",
-                "impact",
-                "uncertainty",
-                "next_checks",
+        if all(current.get(k) for k in ("bug", "function", "location")):
+            if current["bug"].strip().lower() in (
+                "none",
+                "no bugs found",
+                "no bug found",
+                "n/a",
+                "no relevant bugs identified",
+                "no_bugs_found",
             ):
+                current.clear()
+                return
+
+            for key in ("evidence", "impact", "uncertainty", "next_checks"):
                 current.setdefault(key, "Not specified by the model.")
 
-            findings.append(current.copy())
+            findings.append({k: v.strip() for k, v in current.items()})
+            current.clear()
 
-    for match in pattern.finditer(response_text):
-        label = match.group(1).lower()
-        key = FINDING_LABELS[label]
-        value = match.group(2).strip().strip("*").strip()
+    for line in response_text.splitlines():
+        match = header_pattern.match(line)
+        if match:
+            raw_label = match.group(1).lower()
+            key = FINDING_LABELS[raw_label]
+            value = match.group(2).strip().strip("*_").strip()
 
-        if key == "bug":
-            save_current()
-            current = {"bug": value}
-        elif current:
+            if key in current:
+                save_current()
+
             current[key] = value
+            current_key = key
+        elif current_key and line.strip() and current:
+            current[current_key] += "\n" + line.strip()
+        elif not line.strip() and all(
+            current.get(k) for k in ("bug", "function", "location")
+        ):
+            save_current()
+            current_key = None
 
     save_current()
     return findings
 
 
+@observe(name="review_batch")
 def review_batch(
     llm: GroqReviewClient,
     request: str,
@@ -388,8 +235,17 @@ BUSINESS RULES:
 SOURCE FUNCTIONS WITH ORIGINAL LINE NUMBERS:
 {source_text}
 
-Report all distinct defects supported by the supplied source and rules.
-Distinguish source evidence from assumptions. Do not invent line numbers.
+Review the supplied functions against the user's request and business rules.
+
+1. Identify only bugs relevant to the user's request.
+2. Report a bug only when there is sufficient evidence in the source code and business rules.
+3. Do not report unrelated defects.
+4. Do not report multiple findings for the same underlying defect.
+5. Do not report consequences of an existing finding as separate bugs unless they are independently actionable defects.
+6. Do not treat assumptions or possible risks as confirmed bugs.
+7. If the request concerns a specific behavior, examine that behavior and its necessary dependencies, but review every supplied function.
+8. Report multiple findings only when they represent distinct, evidence-supported defects.
+9. Do not invent line numbers or claim code was executed.
 
 For every finding, return exactly these fields:
 Bug: concise defect
@@ -469,7 +325,6 @@ def calculate_usage(
     return totals
 
 
-
 def save_evidence(
     evidence: dict[str, Any],
     output_dir: str | Path,
@@ -490,6 +345,8 @@ def save_evidence(
 
     return path
 
+
+@observe(name="code_review_run")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Review Python source code for bugs."
@@ -519,6 +376,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.request.strip():
         parser.error("--request cannot be blank.")
 
+    if os.getenv("LANGFUSE_PUBLIC_KEY"):
+        try:
+            langfuse.update_current_span(
+                metadata={
+                    "source_file": str(args.file),
+                    "business_rules": args.business_rules,
+                    "request": args.request,
+                }
+            )
+        except Exception:
+            pass
+
     evidence: dict[str, Any] = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "request": args.request,
@@ -536,8 +405,6 @@ def main(argv: list[str] | None = None) -> int:
     findings: list[dict[str, str]] = []
     source_path = Path(args.file)
 
-    
-
     try:
         source = read_source(args.file)
 
@@ -550,7 +417,6 @@ def main(argv: list[str] | None = None) -> int:
         if not source.strip():
             raise ValueError("The source file is empty.")
 
-        # Parse syntax only; do not import or execute source code.
         entries = build_function_index(source)
 
         if not entries:
@@ -565,27 +431,12 @@ def main(argv: list[str] | None = None) -> int:
         llm = GroqReviewClient()
         evidence["model"] = llm.model
 
-        scope, selected = plan_review(
-            llm,
-            args.request,
-            rules,
-            entries,
-            evidence,
-        )
-        evidence["scope"] = scope
-
-        relevant = (
-            entries
-            if scope == "all"
-            else expand_dependencies(selected, entries)
-        )
-
-        batches = make_function_batches(source, relevant)
+        evidence["scope"] = "all_functions"
+        batches = make_function_batches(source, entries)
 
         if not batches:
             raise ValueError("No source batches were created.")
 
-        # Accumulate findings from every batch.
         for index, batch in enumerate(batches):
             batch_findings = review_batch(
                 llm,
@@ -598,7 +449,6 @@ def main(argv: list[str] | None = None) -> int:
             findings.extend(batch_findings)
             findings = deduplicate_findings(findings)
 
-            # Keep evidence synchronized with the accumulated findings.
             evidence["findings"] = findings.copy()
 
             if index < len(batches) - 1:
@@ -606,9 +456,6 @@ def main(argv: list[str] | None = None) -> int:
                     llm.calls[-1].get("total_tokens")
                 )
 
-        # IMPORTANT:
-        # Do not ask another LLM call to consolidate findings.
-        # That extra step could omit valid findings.
         findings = deduplicate_findings(findings)
         evidence["findings"] = findings.copy()
 
@@ -634,7 +481,6 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     except Exception as exc:
-        # Preserve any findings accumulated before the error.
         evidence["findings"] = findings.copy()
         evidence["error"] = f"{type(exc).__name__}: {exc}"
 
@@ -663,13 +509,27 @@ def main(argv: list[str] | None = None) -> int:
                 f"Findings saved: {len(evidence.get('findings', []))}"
             )
         except Exception as save_exc:
-            evidence["outcome"]="failed"
-            evidence["error"]=(
-                f"Could not save review evidence:"
-                f"{type(save_exc).__name__}:{save_exc}"
+            evidence["outcome"] = "failed"
+            evidence["error"] = (
+                f"Could not save review evidence: "
+                f"{type(save_exc).__name__}: {save_exc}"
             )
-            print(f"Review failed: {evidence['error']}"
-            )
+
+        if os.getenv("LANGFUSE_PUBLIC_KEY"):
+            try:
+                if evidence.get("outcome") == "success":
+                    findings_count = len(evidence.get("findings", []))
+                    langfuse.score_current_trace(
+                        name="findings_count",
+                        value=findings_count,
+                        comment=f"{findings_count} findings identified",
+                    )
+                trace_url = langfuse.get_trace_url()
+                if trace_url:
+                    print(f"Langfuse Trace: {trace_url}")
+                langfuse.flush()
+            except Exception:
+                pass
 
     if evidence["outcome"] != "success":
         print(
@@ -684,7 +544,6 @@ def main(argv: list[str] | None = None) -> int:
         print("No relevant bugs identified by the model.")
         return 0
 
-    # Print the exact same findings list used by save_evidence().
     for index, finding in enumerate(final_findings):
         if index:
             print()

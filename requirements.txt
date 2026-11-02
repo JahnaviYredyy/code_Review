@@ -1,3 +1,4 @@
 pytest
 groq
 python-dotenv
+langfuse
