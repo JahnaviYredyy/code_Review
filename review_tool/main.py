@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,14 @@ from uuid import uuid4
 
 from langfuse import get_client, observe
 from review_tool.llm_client import GroqReviewClient
+from review_tool.repository import (
+    assemble_investigation_context,
+    expand_query_with_ai,
+    index_repository,
+    investigate_code,
+    scan_repository,
+    search_relevant_symbols,
+)
 from review_tool.source_reader import read_source
 
 langfuse = get_client()
@@ -346,24 +355,201 @@ def save_evidence(
     return path
 
 
+def run_repo_investigation(args: argparse.Namespace) -> int:
+    """Investigate a plain-English question across a multi-file Python repository."""
+    evidence: dict[str, Any] = {
+        "mode": "repository_investigation",
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "request": args.request,
+        "repository_path": str(args.repo),
+        "provider": "Groq",
+        "model": os.getenv("GROQ_MODEL", MODEL_DEFAULT),
+        "outcome": "failed",
+        "scanned_files": 0,
+        "indexed_symbols": 0,
+        "search_tokens": [],
+        "candidates_found": 0,
+        "files_inspected": [],
+        "cross_file_hops": [],
+        "call_metadata": [],
+        "usage_totals": {},
+        "investigation_report": None,
+    }
+
+    if os.getenv("LANGFUSE_PUBLIC_KEY"):
+        try:
+            langfuse.update_current_span(
+                metadata={
+                    "mode": "repository_investigation",
+                    "repository_path": str(args.repo),
+                    "request": args.request,
+                }
+            )
+        except Exception:
+            pass
+
+    llm = None
+    report = None
+
+    try:
+        # Step 1: Discover all Python files in the repository (Read-only)
+        scan_result = scan_repository(args.repo)
+        evidence["scanned_files"] = scan_result.total_files
+        print(f"\n[AI Tracing] Discovered {scan_result.total_files} Python file(s) in repository.")
+
+        if scan_result.total_files == 0:
+            raise ValueError(f"No Python files found in repository: {args.repo}")
+
+        # Step 2: Index AST across all discovered files
+        index = index_repository(scan_result.files, scan_result.repository_path)
+        evidence["indexed_symbols"] = index.total_symbols
+        print(f"[AI Tracing] Indexed {index.total_symbols} symbols across {index.total_files_indexed} file(s).")
+
+        # Step 3: Search relevant candidate symbols matching user request
+        search_result = search_relevant_symbols(index, args.request)
+        evidence["search_tokens"] = search_result.query_tokens
+        evidence["candidates_found"] = len(search_result.candidates)
+        print(f"[AI Tracing] Search tokens: {search_result.query_tokens} -> Found {len(search_result.candidates)} candidate symbol(s).")
+
+        # If conversational phrasing, slang, or metaphors returned no candidates, try AI keyword expansion fallback
+        if not search_result.candidates:
+            try:
+                expansion_llm = GroqReviewClient()
+                ai_keywords = expand_query_with_ai(expansion_llm, args.request)
+                if ai_keywords:
+                    print(f"[AI Tracing] Expanding search with AI code concepts: {ai_keywords}")
+                    search_result = search_relevant_symbols(index, args.request, extra_tokens=ai_keywords)
+                    evidence["search_tokens"] = search_result.query_tokens
+                    evidence["candidates_found"] = len(search_result.candidates)
+                    print(f"[AI Tracing] Recovered {len(search_result.candidates)} candidate symbol(s) after expansion.")
+            except Exception:
+                pass
+
+        if not search_result.candidates:
+            # Insufficient evidence before contacting LLM
+            report_dict = {
+                "outcome": "INSUFFICIENT_EVIDENCE",
+                "summary": f"No code symbols or keywords matching '{args.request}' were found in the repository.",
+                "root_cause_file": None,
+                "root_cause_lines": None,
+                "root_cause_evidence": None,
+                "suggested_fix": None,
+                "raw_response": "No matching symbols found in repository index.",
+            }
+            evidence["investigation_report"] = report_dict
+            evidence["outcome"] = "success"
+
+            print("\n======================= INVESTIGATION REPORT =======================")
+            print("OUTCOME: INSUFFICIENT_EVIDENCE\n")
+            print(f"REASON: {report_dict['summary']}")
+            print("====================================================================")
+            return 0
+
+        # Step 4: Traverse cross-file dependencies and build bounded context
+        context = assemble_investigation_context(index, search_result.candidates)
+        evidence["files_inspected"] = context.files_included
+        evidence["cross_file_hops"] = [
+            {
+                "caller": h.caller_symbol,
+                "caller_file": h.caller_file,
+                "callee": h.callee_symbol,
+                "callee_file": h.callee_file,
+            }
+            for h in context.cross_file_hops
+        ]
+        hops_cnt = len(context.cross_file_hops)
+        print(f"[AI Tracing] Cross-file hops traversed: {hops_cnt}. Assembled {len(context.symbols_included)} symbol(s) across {len(context.files_included)} file(s) ({context.total_characters:,} chars).")
+
+        # Step 5: Run LLM Investigation
+        llm = GroqReviewClient()
+        evidence["model"] = llm.model
+        print(f"[AI Tracing] Sending bounded multi-file context to {llm.model}...")
+
+        report = investigate_code(llm, args.request, context)
+        evidence["investigation_report"] = asdict(report)
+        evidence["outcome"] = "success"
+
+        # Step 6: Print clean terminal report
+        print("\n======================= INVESTIGATION REPORT =======================")
+        print(f"OUTCOME: {report.outcome}\n")
+
+        if report.outcome == "SUFFICIENT_EVIDENCE":
+            if report.summary:
+                print(f"SUMMARY:\n{report.summary}\n")
+            if report.root_cause_file or report.root_cause_lines:
+                print("ROOT CAUSE:")
+                if report.root_cause_file:
+                    print(f"File: {report.root_cause_file}")
+                if report.root_cause_lines:
+                    print(f"Lines: {report.root_cause_lines}")
+                if report.root_cause_evidence:
+                    print(f"Evidence: {report.root_cause_evidence}")
+                print()
+            if report.suggested_fix:
+                print(f"SUGGESTED FIX:\n{report.suggested_fix}\n")
+        else:
+            print(f"REASON:\n{report.summary}\n")
+
+        print("====================================================================")
+
+    except Exception as exc:
+        evidence["outcome"] = "failed"
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"Investigation failed: {type(exc).__name__}: {exc}")
+        return 1
+
+    finally:
+        evidence["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if llm is not None:
+            evidence["call_metadata"] = llm.calls
+            evidence["usage_totals"] = calculate_usage(llm.calls)
+
+        try:
+            output_path = save_evidence(evidence, args.output_dir)
+            print(f"JSON saved to: {output_path.resolve()}")
+        except Exception:
+            pass
+
+        if os.getenv("LANGFUSE_PUBLIC_KEY"):
+            try:
+                if report:
+                    langfuse.score_current_trace(
+                        name="sufficient_evidence",
+                        value=1.0 if report.outcome == "SUFFICIENT_EVIDENCE" else 0.0,
+                        comment=f"Outcome: {report.outcome}",
+                    )
+                trace_url = langfuse.get_trace_url()
+                if trace_url:
+                    print(f"Langfuse Trace: {trace_url}")
+                langfuse.flush()
+            except Exception:
+                pass
+
+    return 0
+
+
+# This main function is controller that connects all the individual functions
 @observe(name="code_review_run")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Review Python source code for bugs."
+        description="Review Python source code or investigate a multi-file repository."
     )
     parser.add_argument(
         "--file",
-        required=True,
-        help="Path to the Python source file.",
+        help="Path to a single Python source file to review.",
+    )
+    parser.add_argument(
+        "--repo",
+        help="Path to a Python repository directory to investigate.",
     )
     parser.add_argument(
         "--request",
         required=True,
-        help="Describe what you want reviewed.",
+        help="Describe what you want reviewed or investigated.",
     )
     parser.add_argument(
         "--business-rules",
-        help="Optional path to business rules.",
+        help="Optional path to business rules (for single-file review).",
     )
     parser.add_argument(
         "--output-dir",
@@ -376,6 +562,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.request.strip():
         parser.error("--request cannot be blank.")
 
+    if not args.file and not args.repo:
+        parser.error("Either --file or --repo must be provided.")
+
+    if args.file and args.repo:
+        parser.error("Specify either --file or --repo, not both.")
+
+    # Route to multi-file repository investigation mode
+    if args.repo:
+        return run_repo_investigation(args)
+
+    # Otherwise execute single-file code review mode
     if os.getenv("LANGFUSE_PUBLIC_KEY"):
         try:
             langfuse.update_current_span(
