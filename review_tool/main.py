@@ -392,6 +392,42 @@ def run_repo_investigation(args: argparse.Namespace) -> int:
     report = None
 
     try:
+        # Step 0: Check for business rules (explicit argument or auto-detected in repo)
+        rules_text = ""
+        rules_source = None
+        if args.business_rules:
+            rules_source = args.business_rules
+            rules_text = read_source(args.business_rules)
+        else:
+            repo_path = Path(args.repo)
+            candidate_names = (
+                "BUSINESS_RULES.md", "business_rules.md", "RULES.md", "rules.md",
+                "SPECIFICATION.md", "specification.md", "REQUIREMENTS.md", "requirements.md",
+            )
+            # Check repository root first
+            for candidate_name in candidate_names:
+                candidate_path = repo_path / candidate_name
+                if candidate_path.is_file():
+                    rules_source = candidate_name
+                    rules_text = read_source(str(candidate_path))
+                    break
+
+            # If not at root, search subdirectories (e.g. review-input/, docs/, etc.)
+            if not rules_text:
+                for candidate_name in candidate_names:
+                    matches = [
+                        p for p in repo_path.glob(f"**/{candidate_name}")
+                        if ".git" not in p.parts and ".venv" not in p.parts and "__pycache__" not in p.parts
+                    ]
+                    if matches:
+                        rules_source = str(matches[0].relative_to(repo_path))
+                        rules_text = read_source(str(matches[0]))
+                        break
+
+        if rules_source and rules_text.strip():
+            evidence["business_rules_file"] = str(rules_source)
+            print(f"\n[AI Tracing] Loaded business rules: {rules_source} ({len(rules_text):,} chars).")
+
         # Step 1: Discover all Python files in the repository (Read-only)
         scan_result = scan_repository(args.repo)
         evidence["scanned_files"] = scan_result.total_files
@@ -465,7 +501,7 @@ def run_repo_investigation(args: argparse.Namespace) -> int:
         evidence["model"] = llm.model
         print(f"[AI Tracing] Sending bounded multi-file context to {llm.model}...")
 
-        report = investigate_code(llm, args.request, context)
+        report = investigate_code(llm, args.request, context, business_rules=rules_text)
         evidence["investigation_report"] = asdict(report)
         evidence["outcome"] = "success"
 
@@ -474,6 +510,8 @@ def run_repo_investigation(args: argparse.Namespace) -> int:
         print(f"OUTCOME: {report.outcome}\n")
 
         if report.outcome == "SUFFICIENT_EVIDENCE":
+            if report.analysis:
+                print(f"ANALYSIS:\n{report.analysis}\n")
             if report.summary:
                 print(f"SUMMARY:\n{report.summary}\n")
             if report.root_cause_file or report.root_cause_lines:

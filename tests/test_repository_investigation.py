@@ -282,4 +282,108 @@ def test_expand_query_with_ai_mocked():
     assert "calculate_discount" in expanded
 
 
+def test_investigate_code_with_business_rules_and_analysis():
+    """investigate_code passes business rules to LLM prompt and parses step-by-step analysis."""
+    from review_tool.repository.investigator import investigate_code
+    from review_tool.repository.cross_file import InvestigationContext
+
+    captured_prompts = []
+
+    class FakeLLM:
+        def __init__(self):
+            self.model = "test-model"
+            self.calls = []
+
+        def complete(self, sys_prompt, user_prompt, **kwargs):
+            captured_prompts.append(user_prompt)
+            output = (
+                "OUTCOME: SUFFICIENT_EVIDENCE\n"
+                "ANALYSIS: Rule 10 states standard shipping is free over 10000 cents, but code compares subtotal.\n"
+                "SUMMARY: Shipping was charged when it should have been free under Rule 10.\n"
+                "ROOT_CAUSE:\n"
+                "File: services/order.py\n"
+                "Lines: 45-48\n"
+                "Evidence: shipping_cost(subtotal) ignores discount.\n"
+                "SUGGESTED_FIX:\n"
+                "File: services/order.py\n"
+                "Lines: 45-48\n"
+                "Fix:\n"
+                "```python\n"
+                "shipping_cost(subtotal - discount)\n"
+                "```\n"
+            )
+            return output, {"total_tokens": 150}
+
+    dummy_context = InvestigationContext(
+        formatted_code="def shipping_cost(): pass",
+        symbols_included=[],
+        files_included=["services/order.py"],
+        cross_file_hops=[],
+        total_characters=30,
+        has_symbols=True,
+    )
+
+    report = investigate_code(
+        FakeLLM(),
+        "Why was shipping charged?",
+        dummy_context,
+        business_rules="- Rule 10: Standard shipping is free over 10,000 cents.",
+    )
+
+    assert "EXPECTED BUSINESS RULES & SPECIFICATIONS:" in captured_prompts[0]
+    assert "Rule 10: Standard shipping is free" in captured_prompts[0]
+    assert report.outcome == "SUFFICIENT_EVIDENCE"
+    assert report.analysis is not None
+    assert "Rule 10" in report.analysis
+    assert "services/order.py" in report.root_cause_file
+
+
+def test_repo_auto_detects_business_rules(sample_repo, tmp_path, monkeypatch, capsys):
+    """Repository investigation automatically detects BUSINESS_RULES.md in the repo root."""
+    # Write a BUSINESS_RULES.md in the sample repo
+    rules_file = sample_repo / "BUSINESS_RULES.md"
+    rules_file.write_text("- Rule 1: Empty cart is invalid.", encoding="utf-8")
+
+    captured_rules = []
+
+    class FakeInvestigatorClient:
+        def __init__(self):
+            self.model = "test-model"
+            self.calls = []
+
+        def complete(self, sys_prompt, user_prompt, **kwargs):
+            self.calls.append({"prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 100})
+            captured_rules.append(user_prompt)
+            output = (
+                "OUTCOME: SUFFICIENT_EVIDENCE\n"
+                "ANALYSIS: Checked against Rule 1.\n"
+                "SUMMARY: Cart violates Rule 1.\n"
+                "ROOT_CAUSE:\n"
+                "File: models/cart.py\n"
+                "Lines: 6-7\n"
+                "Evidence: len(items) == 0\n"
+                "SUGGESTED_FIX:\n"
+                "File: models/cart.py\n"
+                "Lines: 6-7\n"
+                "Fix:\n```python\npass\n```\n"
+            )
+            return output, {"total_tokens": 100}
+
+    monkeypatch.setattr(review_main, "GroqReviewClient", FakeInvestigatorClient)
+
+    exit_code = review_main.main([
+        "--repo", str(sample_repo),
+        "--request", "Why does checkout fail?",
+        "--output-dir", str(tmp_path / "reviews"),
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Loaded business rules: BUSINESS_RULES.md" in captured.out
+    assert any("Rule 1: Empty cart is invalid." in prompt for prompt in captured_rules)
+
+
+
+
+
 

@@ -15,20 +15,24 @@ You are an expert Python software investigator.
 Your job is to investigate a user's question or bug report across a multi-file Python repository.
 
 CRITICAL RULES:
-1. Base your explanation strictly on the provided source code blocks. Do not invent files, functions, or lines.
+1. Base your explanation strictly on the provided source code blocks and any supplied business rules. Do not invent files, functions, or lines.
 2. Read the file paths and line numbers carefully from the supplied code headers.
-3. If the provided code contains sufficient evidence to explain the issue:
-   - State the concise summary of the issue.
-   - Point to the exact root cause with File path and Line numbers.
-   - Propose a concrete Suggested Fix with code.
-4. If the provided code DOES NOT contain sufficient evidence to conclusively explain the issue:
+3. Compare code behavior against any business rules provided. If code contradicts a business rule, identify that violation as a defect.
+4. Before writing your conclusions, trace the execution logic and data flow step-by-step under ANALYSIS.
+5. If the provided code contains sufficient evidence to explain the issue:
+   - Provide your step-by-step reasoning under ANALYSIS.
+   - State the concise summary of the issue under SUMMARY.
+   - Point to the exact root cause with File path and Line numbers under ROOT_CAUSE.
+   - Propose a concrete Suggested Fix with code under SUGGESTED_FIX.
+6. If the provided code DOES NOT contain sufficient evidence to conclusively explain the issue:
    - You MUST output OUTCOME: INSUFFICIENT_EVIDENCE.
-   - Explain what is missing and what additional files, dependencies, or runtime data would be needed.
+   - Explain what is missing and what additional files, dependencies, or runtime data would be needed under REASON.
 
 OUTPUT FORMAT:
 
 If evidence is sufficient:
 OUTCOME: SUFFICIENT_EVIDENCE
+ANALYSIS: <step-by-step trace of the execution and data flow comparing code against business rules>
 SUMMARY: <clear explanation answering the user question>
 ROOT_CAUSE:
 File: <exact relative file path>
@@ -52,6 +56,7 @@ REASON: <what cannot be verified from the retrieved code and what additional fil
 class InvestigationReport:
     outcome: str  # "SUFFICIENT_EVIDENCE" or "INSUFFICIENT_EVIDENCE"
     summary: str
+    analysis: str | None = None
     root_cause_file: str | None = None
     root_cause_lines: str | None = None
     root_cause_evidence: str | None = None
@@ -79,6 +84,9 @@ def parse_investigation_response(response_text: str) -> InvestigationReport:
         )
 
     # Extract fields for sufficient evidence
+    analysis_match = re.search(r"ANALYSIS:\s*(.*?)(?=SUMMARY:|ROOT_CAUSE:|$)", text, re.DOTALL | re.IGNORECASE)
+    analysis = analysis_match.group(1).strip() if analysis_match else None
+
     summary_match = re.search(r"SUMMARY:\s*(.*?)(?=ROOT_CAUSE:|$)", text, re.DOTALL | re.IGNORECASE)
     summary = summary_match.group(1).strip() if summary_match else ""
 
@@ -99,12 +107,14 @@ def parse_investigation_response(response_text: str) -> InvestigationReport:
         return InvestigationReport(
             outcome="SUFFICIENT_EVIDENCE",
             summary=text,
+            analysis=analysis,
             raw_response=text,
         )
 
     return InvestigationReport(
         outcome="SUFFICIENT_EVIDENCE",
         summary=summary,
+        analysis=analysis,
         root_cause_file=root_cause_file,
         root_cause_lines=root_cause_lines,
         root_cause_evidence=root_cause_evidence,
@@ -118,17 +128,26 @@ def investigate_code(
     llm: GroqReviewClient,
     request: str,
     context: InvestigationContext,
+    business_rules: str = "",
 ) -> InvestigationReport:
-    """Send targeted multi-file context to the LLM and return structured investigation report."""
+    """Send targeted multi-file context and business rules to the LLM and return structured investigation report."""
+    rules_section = ""
+    if business_rules.strip():
+        rules_section = f"""\
+
+EXPECTED BUSINESS RULES & SPECIFICATIONS:
+{business_rules.strip()}
+"""
+
     user_prompt = f"""\
 USER QUESTION / REQUEST:
 {request}
-
+{rules_section}
 RELEVANT SOURCE CODE EXTRACTED FROM REPOSITORY:
 {context.formatted_code}
 
-Investigate the question using the extracted code above.
-Cite exact file paths and line numbers.
+Investigate the question by comparing the extracted code against any business rules above.
+Trace the logic step-by-step under ANALYSIS first, then cite exact file paths and line numbers.
 If the cause is not supported by this code, state OUTCOME: INSUFFICIENT_EVIDENCE.
 """
 

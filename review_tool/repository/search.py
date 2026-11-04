@@ -10,11 +10,11 @@ from review_tool.repository.indexer import IndexedRepository, IndexedSymbol
 
 STOP_WORDS = {
     "a", "about", "an", "and", "are", "as", "at", "be", "by", "can", "could",
-    "did", "didn", "didnt", "do", "does", "explain", "for", "from", "got", "how",
+    "did", "didn", "didnt", "do", "doe", "does", "explain", "follow", "for", "from", "got", "how",
     "i", "if", "in", "into", "is", "isn", "isnt", "it", "its", "me", "my",
     "no", "not", "of", "on", "or", "our", "please", "should", "so", "such",
     "tell", "that", "the", "their", "then", "there", "these", "they", "this",
-    "to", "used", "was", "wasn", "wasnt", "we", "were", "what", "when", "where",
+    "to", "used", "was", "wasn", "wasnt", "way", "we", "were", "what", "when", "where",
     "which", "who", "why", "will", "with", "would", "rs", "inr", "usd", "eur",
 }
 
@@ -36,7 +36,9 @@ DOMAIN_SYNONYMS: dict[str, list[str]] = {
     "ship": ["shipping", "delivery"],
     "shipping": ["ship", "delivery"],
     "cost": ["price", "cents", "amount"],
-    "tax": ["tax_cents", "taxable"],
+    "tax": ["tax_cents", "taxable", "gst", "vat"],
+    "gst": ["tax", "tax_cents", "taxable"],
+    "vat": ["tax", "tax_cents", "taxable"],
     "buyer": ["customer"],
     "purchased": ["order", "checkout"],
 }
@@ -51,6 +53,8 @@ class SearchResult:
 
 def _stem_word(word: str) -> str | None:
     """Derive simple base stem for regular English word endings."""
+    if word in ("does", "this", "these", "status", "focus", "basis", "gross"):
+        return None
     if word.endswith("ed") and len(word) > 4:
         if word.endswith("pped") or word.endswith("bbed") or word.endswith("gged") or word.endswith("tted"):
             return word[:-3]  # e.g., capped -> cap
