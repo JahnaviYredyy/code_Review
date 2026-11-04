@@ -1,238 +1,235 @@
-# AI-Powered Code Review Tool
+# AI-Powered Code Review & Repository Investigation Tool
 
-A Python command-line tool that uses a Groq-hosted large language model (LLM) to review source code for potential bugs and logic errors. It can use business rules as additional context so that the review considers both the implementation and the expected behavior.
+A production-grade Python CLI tool that uses Groq-hosted Large Language Models (LLMs) and Python AST analysis to investigate bugs across multi-file codebases and perform single-file code reviews. It cross-examines implementation code against business specifications with end-to-end Langfuse observability.
 
-## Features
+---
 
-* AI-powered code review using Groq.
-* Business-rule-aware analysis.
-* Python AST indexing of functions, line ranges, and function calls.
-* Focused reviews using a natural-language request.
-* Dependency expansion to include called functions.
-* Batching of functions to manage request size.
-* Structured finding extraction: bug, function, location, evidence, impact, uncertainty, and next checks.
-* Exact duplicate finding removal.
-* JSON evidence and metadata output.
-* Source-file hash comparison before and after review.
-* Token usage tracking when provider metadata is available.
+## Key Features
 
-> \*\*Important:\*\* The tool uses an LLM to suggest possible defects. Findings are not guaranteed to be correct or complete; verify them before making changes.
+### 1. Multi-File Repository Investigation (`--repo`)
+* **AST-Based Symbol Indexing:** Parses all project `.py` files into an in-memory symbol graph (classes, functions, line bounds, and call hierarchies) without executing any code.
+* **Smart Hybrid Search Engine:**
+  * **Alphanumeric Code Preservation:** Keeps codes like `SAVE10` intact while extracting prefixes like `save`.
+
+### 2. Business Rules Auto-Detection
+* Automatically detects and loads rules files (`BUSINESS_RULES.md`, `rules.md`, `SPECIFICATION.md`, `REQUIREMENTS.md`) from the repository root **or subdirectories** (such as `review-input/` or `docs/`).
+* You can also specify any custom-named rules file using `--business-rules <path>`.
+* The AI compares source code logic directly against these rules to catch domain bugs (e.g., taxes applied before vs. after discounts, or un-capped promotions).
+
+### 3. Step-by-Step Chain-of-Thought Reasoning
+* The investigation prompt requires the model to produce an `ANALYSIS:` execution trace before writing `ROOT_CAUSE` and `SUGGESTED_FIX`, eliminating hasty guesses on subtle bugs.
+
+### 4. Single-File Deep Code Review (`--file`)
+* Batches functions with character limits (`MAX_BATCH_CHARS = 8500`) to prevent context window overflow.
+* Extracts structured defect records: bug description, function, line location, evidence, impact, uncertainty, and next verification checks.
+* Deduplicates findings and verifies source file immutability with pre- and post-review SHA-256 checksums.
+
+### 5. Observability & Telemetry (Langfuse & Local JSON)
+* Traces AST indexing, token counts, model latency, search tokens, and evidence outcomes.
+* Scores investigation outcomes in Langfuse (`sufficient_evidence` = 1.0 vs. 0.0).
+* Fallback proxy ensures the CLI runs smoothly even if Langfuse credentials or network access are unavailable.
+* Saves full timestamped run metadata to `reviews/review_<uuid>.json`.
+
+---
 
 ## Project Structure
 
-
+```text
 code-review-tool/
-├── review\_tool/
-│   ├── main.py
-│   ├── source\_reader.py
-│   └── llm\_client.py
-├── review-input/
-│   ├── order\_service.py
-│   └── BUSINESS\_RULES.md
-├── reviews/
-├──.env
-├── .gitignore
-├── requirements.txt
-└── README.md
-
-
-### Main components
-
-* `review\_tool/main.py` — Coordinates the review workflow, parses command-line arguments, builds the function index, plans and batches the review, parses findings, removes exact duplicates, and saves output.
-* `review\_tool/source\_reader.py` — Reads source code for review.
-* `review\_tool/llm\_client.py` — Handles communication with the Groq API.
-* `review-input/order\_service.py` — Example source file to review.
-* `review-input/BUSINESS\_RULES.md` — Example business rules supplied as review context.
-* `reviews/` — Intended location for saved review output; the actual output directory depends on the command-line option.
-<<<<<<< HEAD
-* `tests/` — Test files, if maintained in the project. The current `main.py` version described here does not automatically run tests during a review.
-=======
-
->>>>>>> origin/main
-
-The exact contents may vary by local project version.
-
-## Requirements
-
-* Python 3.10 or newer is recommended.
-* A Groq API key.
-* Internet access to call the Groq API.
-* Python packages listed in `requirements.txt`.
-
-## Setup
-
-### 1\. Open the project directory
-
-Open the `code-review-tool` folder in VS Code and use the terminal to enter the project root:
-
-```powershell
-cd path\\to\\code-review-tool
+├── review_tool/
+│   ├── main.py                     # CLI entry point, routing, and batch review controller
+│   ├── llm_client.py               # Groq LLM client with OpenTelemetry / Langfuse instrumentation
+│   ├── source_reader.py            # Safe source code and rules reader
+│   └── repository/                 # Multi-file repository investigation subsystem
+│       ├── __init__.py             # Package exports
+│       ├── scanner.py              # Recursive file traversal, filtering .git, .venv, caches
+│       ├── indexer.py              # AST parser extracting classes, functions, calls, and literals
+│       ├── search.py               # Tokenizer, stemmer, domain synonyms, and fuzzy relevance scoring
+│       ├── cross_file.py           # Cross-file call-graph tracer and context dossier assembler
+│       └── investigator.py         # AI prompt builder, chain-of-thought analyzer, and output parser
+├── tests/
+│   ├── test_main.py                # Single-file review unit tests
+│   └── test_repository_investigation.py # 19 unit & integration tests covering the repository subsystem
+├── review-input/                   # Sample e-commerce codebase with known edge-case bugs
+│   ├── order_service.py            # Multi-service ordering, inventory, and pricing system
+│   └── BUSINESS_RULES.md           # Business specification rules for validation
+├── reviews/                        # Output folder where JSON run evidence is saved
+├── requirements.txt                # Python package dependencies
+└── README.md                       # Documentation
 ```
 
-Replace the example path with the actual path on your computer.
+---
 
-### 2\. Create and activate a virtual environment
+## Prerequisites
 
+* **Python:** 3.10 or newer (tested on Python 3.11 and 3.13).
+* **Groq API Key:** Free API key from [console.groq.com](https://console.groq.com/).
+* **Langfuse Credentials (Optional):** Free account from [cloud.langfuse.com](https://cloud.langfuse.com/) for tracing.
+
+---
+
+## Setup & Installation
+
+### 1. Clone or Open the Project
+Open terminal and navigate to the project directory:
+```bash
+cd path/to/code-review-tool
+```
+
+### 2. Create and Activate a Virtual Environment
+**On Windows (PowerShell):**
 ```powershell
 python -m venv .venv
-.\\.venv\\Scripts\\Activate.ps1
+.\.venv\Scripts\Activate.ps1
+```
+*(If PowerShell blocks script execution, run: `Set-ExecutionPolicy -Scope Process RemoteSigned` first).*
+
+**On Linux / macOS:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-If PowerShell blocks activation in the current terminal session, run:
-
-```powershell
-Set-ExecutionPolicy -Scope Process RemoteSigned
-.\\.venv\\Scripts\\Activate.ps1
-```
-
-### 3\. Install dependencies
-
-```powershell
+### 3. Install Dependencies
+```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-If `requirements.txt` does not include every package imported by your code, add the required dependencies.
-
-### 4\. Configure the Groq API key
-
-Create a `.env` file in the project root, using `.env.example` as a template if available:
-
+### 4. Configure Environment Variables
+Create a `.env` file in the project root:
 ```dotenv
-GROQ\_API\_KEY=your\_groq\_api\_key\_here
+# Required: Groq LLM configuration
+GROQ_API_KEY=gsk_your_groq_api_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+
+# Optional: Langfuse Cloud Observability
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
-Replace the placeholder with your own key. Keep `.env` private and ensure it is excluded by `.gitignore`. **Do not commit or share your API key.**
+---
 
-The review code's default model is:
+## Usage Guide
 
+### Mode 1: Multi-File Repository Investigation (`--repo`)
+
+Investigate bugs or questions across an entire project folder:
+
+#### Example A: Check discount capping across files
+```bash
+python -m review_tool.main --repo review-input --request "Customer used SAVE10 on Rs 10,000 cart, got Rs 1,000 off, why wasn't it capped?"
+```
+
+#### Example B: Check tax / GST compliance against business rules
+```bash
+python -m review_tool.main --repo review-input --request "Does the way GST is calculated on an order follow our business rules?"
+```
+
+#### Example C: Investigate a custom external repository
+```bash
+python -m review_tool.main --repo "C:\Projects\my-app" --request "Why does order placement crash when the inventory is empty?"
+```
+
+#### Example D: Explicitly provide a custom rules file
+```bash
+python -m review_tool.main --repo "C:\Projects\my-app" --business-rules "docs/spec.txt" --request "Check refund calculation limits"
+```
+
+---
+
+### Mode 2: Single-File Code Review (`--file`)
+
+Perform an exhaustive, function-by-function code review on a single Python file:
+
+```bash
+python -m review_tool.main --file review-input/order_service.py --business-rules review-input/BUSINESS_RULES.md --request "Review checkout and discount calculation"
+```
+
+---
+
+## Command-Line Arguments Reference
+
+| Argument | Type | Description |
+| :--- | :--- | :--- |
+| `--repo` | Optional | Path to a repository folder to investigate (mutually exclusive with `--file`). |
+| `--file` | Optional | Path to a single Python file to review (mutually exclusive with `--repo`). |
+| `--request` | **Required** | The plain-English question, defect inquiry, or review goal. |
+| `--business-rules` | Optional | Path to a custom rules or specification file (`.md`, `.txt`). If omitted in `--repo` mode, standard rules files are auto-detected. |
+| `--output-dir` | Optional | Folder where JSON run evidence is saved (default: `reviews`). |
+
+---
+
+## Understanding the Investigation Report
+
+When running in `--repo` mode, the tool outputs a structured diagnosis:
+
+### 1. When evidence is confirmed:
 ```text
-openai/gpt-oss-120b
+======================= INVESTIGATION REPORT =======================
+OUTCOME: SUFFICIENT_EVIDENCE
+
+ANALYSIS:
+Rule 10 states standard shipping is free when merchandise AFTER discount
+is at least 10,000 cents. In order_service.py:525, shipping_cost is called
+with `subtotal` instead of `subtotal - discount`. When an order has a subtotal
+of 12,000 cents and a 3,000 cent discount, the net merchandise is 9,000 cents,
+so shipping should have been charged 500 cents, but was made free.
+
+SUMMARY:
+Standard shipping threshold is calculated against gross subtotal instead of
+merchandise after discount, violating Business Rule 10.
+
+ROOT CAUSE:
+File: order_service.py
+Lines: 524-526
+Evidence: `shipping = self.shipping_cost(request.shipping, subtotal, discount)`
+
+SUGGESTED FIX:
+File: order_service.py
+Lines: 525-526
+Fix:
+```python
+net_subtotal = max(subtotal - discount, 0)
+shipping = self.shipping_cost(request.shipping, net_subtotal, discount)
+```
+====================================================================
 ```
 
-The configured model must be available to your Groq account. If your code or environment specifies a different model, follow that configuration.
+### 2. When evidence is missing or unsupported:
+```text
+======================= INVESTIGATION REPORT =======================
+OUTCOME: INSUFFICIENT_EVIDENCE
 
-## Run a Code Review
-
-Run commands from the project root.
-
-### Example: review discount calculation
-
-```powershell
-python -m review\_tool.main --file review-input/order\_service.py --request "Check discount calculation" --business-rules review-input/BUSINESS\_RULES.md
+REASON:
+The extracted snippets from order_service.py call external payment gateway
+methods, but payment_gateway.py was not found or provided. Without inspecting
+the gateway's decline-handling logic, the root cause cannot be verified.
+====================================================================
 ```
 
-### Example: review without business rules
+---
 
-```powershell
-python -m review\_tool.main --file review-input/order\_service.py --request "Find potential bugs in order cancellation"
+## Running the Automated Test Suite
+
+The project includes an automated test suite verifying file scanning, AST indexing, cross-file call resolution, fuzzy search, prompt generation, and business-rules auto-detection:
+
+```bash
+# Set PYTHONPATH and execute pytest
+$env:PYTHONPATH="code-review-tool"; python -m pytest code-review-tool/tests
 ```
 
-### Command-line arguments
-
-|Argument|Purpose|
-|-|-|
-|`--file`|Path to the source file to review.|
-|`--request`|Describes the review goal or behavior to investigate.|
-|`--business-rules`|Optional path to the business-rules document.|
-|`--output-dir`|Directory in which review output is saved.|
-
-Check the arguments supported by your current `main.py` if you have changed the implementation.
-
-## How It Works
-
-1. **Read inputs:** Reads the source file and, if supplied, the business-rules document.
-2. **Validate and fingerprint source:** Checks that the source can be parsed and calculates a hash to help detect changes during review.
-3. **Build a function index:** Python's AST identifies functions, their line ranges, and function calls. AST organizes code; it does not independently determine whether the code contains a bug.
-4. **Plan the review:** The LLM receives the request, rules, function index, and supporting evidence to help select the review scope.
-5. **Expand dependencies:** May include functions called by selected functions for extra context.
-6. **Create batches:** Groups function source into manageable batches.
-7. **Review batches:** Sends each batch and relevant rules to the model to identify potential defects.
-8. **Parse findings:** Converts model output into structured findings. Responses missing required fields may be discarded.
-9. **Deduplicate findings:** Removes exact duplicates based on the configured bug, function, and location fields. Similar findings with different wording may remain.
-10. **Save results:** Saves evidence and metadata to the configured output directory and reports findings in the terminal.
-11. **Check source preservation:** Compares the source hash after review with the hash captured before review to check whether the source changed.
-
-## Understanding Findings
-
-A finding may include:
-
-* **Bug:** Description of the suspected defect.
-* **Function:** Function associated with the finding.
-* **Location:** Relevant line number or code location.
-* **Evidence:** Code or rule supporting the concern.
-* **Impact:** Possible consequence.
-* **Uncertainty:** Any uncertainty in the model's conclusion.
-* **Next checks:** Suggested verification steps.
-
-Treat findings as hypotheses to investigate, not proof that a defect exists. Confirm the location, trace the execution path, and compare behavior with the business rules.
-
-## Output
-
-The tool writes evidence and review metadata to the output directory specified by `--output-dir`, using the filenames and formats implemented in the current code. If no output directory is specified, the code's default is used.
-
-Example:
-
-```powershell
-python -m review\_tool.main --file review-input/order\_service.py --request "Review coupon validation" --business-rules review-input/BUSINESS\_RULES.md --output-dir reviews
+**Expected output:**
+```text
+============================= 19 passed in 6.20s ==============================
 ```
 
-Inspect the terminal output and generated JSON evidence files. Exact filenames depend on the implementation.
+---
 
-## Troubleshooting
+## Safety & Security Principles
 
-### `GROQ\_API\_KEY` is missing or invalid
-
-* Check that `.env` is in the project root.
-* Confirm the variable is spelled `GROQ\_API\_KEY`.
-* Ensure the key is valid and has not been revoked.
-* Do not paste the secret key into source code or public logs.
-
-### Model or provider error
-
-* Confirm the configured model is available to your account.
-* Check your network connection and provider limits.
-* Read the client error and retry when appropriate.
-
-### Source file cannot be parsed
-
-* Check the reported syntax error.
-* Try a valid Python source file.
-
-### No findings are returned
-
-* Make the `--request` more specific.
-* Check that the business rules clearly describe expected behavior.
-* Check provider responses and the parser's required fields.
-* An empty result does not prove the code is bug-free.
-
-### Similar findings appear more than once
-
-The tool removes exact duplicates, not all semantically similar findings. Compare findings by root cause and determine whether they describe separate defects or multiple consequences of one defect.
-
-<<<<<<< HEAD
-## Limitations
-
-* The LLM can produce false positives, miss real defects, or misunderstand business rules.
-* Results depend on prompt quality, supplied context, provider response, and parsing logic.
-* Token limits and provider rate limits can affect large reviews.
-* Exact-match deduplication may leave similar findings.
-* The source hash check helps detect changes to the reviewed source file; it is not a general security or integrity guarantee.
-* This version of `main.py` does **not** automatically execute the project's test suite. Run tests separately if the project has them.
-
-## Security Notes
-
-* Keep API keys in `.env` and exclude secret files from version control.
-* Do not submit code or business data to an external model unless you are authorized to share it with that provider.
-* Verify generated findings before changing production code.
-* Back up or version-control source files before making manual fixes.
-
-## License
-
-Add your project's license here if you plan to distribute it.
-=======
-
-
-
->>>>>>> origin/main
-
+* **Strictly Read-Only:** The tool analyzes source files as text; it **never executes, imports, or modifies** code in the target repository.
+* **Bounded Context:** Rather than sending whole repositories to the LLM (which introduces token limits and prompt distraction), it extracts only relevant functions and their direct call partners.
+* **Secret Protection:** Automatic scanner filters ignore `.env`, `.git`, `.venv`, and binary files.
+* **Deterministic Analysis:** LLM temperature is pinned to `0.0` for repeatable, analytical evaluations.
